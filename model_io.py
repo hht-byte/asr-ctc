@@ -36,18 +36,29 @@ def load_encoder(model_path: str, device: str, backend: str = "hf"):
 
 
 def encode_audio(encoder, feature_extractor, path: str | Path, device: str,
-                 backend: str):
-    import numpy as np
+                 backend: str, end_sample: int | None = None):
     import soundfile as sf
-    import torch
 
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=False)
     if sample_rate != 16000:
         raise ValueError(f"{path}: expected 16 kHz audio, got {sample_rate} Hz")
     if audio.ndim == 2:
         audio = audio.mean(axis=1)
+    if end_sample is not None:
+        if type(end_sample) is not int or end_sample < 1 or end_sample > len(audio):
+            raise ValueError(f"{path}: end_sample exceeds audio length or is invalid")
+        audio = audio[:end_sample]
+    return encode_waveform(encoder, feature_extractor, audio, device, backend)
+
+
+def encode_waveform(encoder, feature_extractor, audio, device: str, backend: str):
+    """Encode one already-loaded 16 kHz mono waveform without reading from disk."""
+    import numpy as np
+    import torch
+
+    audio = np.asarray(audio)
     if audio.ndim != 1 or len(audio) < 8000 or not np.isfinite(audio).all():
-        raise ValueError(f"{path}: expected finite mono audio of at least 0.5 s")
+        raise ValueError("expected finite mono audio of at least 0.5 s")
     inputs = feature_extractor(
         [audio], sampling_rate=16000, return_tensors="pt",
         return_attention_mask=True, padding="longest", truncation=False
@@ -68,5 +79,5 @@ def encode_audio(encoder, feature_extractor, path: str | Path, device: str,
             raise ValueError(f"unknown backend: {backend}")
         states = encoded.last_hidden_state
     if states.ndim != 2 or states.shape[0] == 0:
-        raise RuntimeError(f"{path}: unexpected audio encoder output shape {tuple(states.shape)}")
+        raise RuntimeError(f"unexpected audio encoder output shape {tuple(states.shape)}")
     return states.detach().to(device="cpu", dtype=torch.float16)

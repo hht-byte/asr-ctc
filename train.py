@@ -15,6 +15,8 @@ from pathlib import Path
 from ctc_pilot import (build_vocabulary, collapse_ctc, evaluate_predictions,
                        load_manifest, minimum_ctc_frames, split_records)
 from model_io import encode_audio, load_encoder
+from score_teacher import read_rows, score_rows
+from streaming_ctc import load_stream_manifest, split_stream_records
 
 
 def arguments() -> argparse.Namespace:
@@ -25,6 +27,11 @@ def arguments() -> argparse.Namespace:
                         help="hf = Transformers native; qwen = original qwen-asr checkpoint")
     parser.add_argument("--manifest", required=True, help="JSONL with audio and text fields")
     parser.add_argument("--dev-manifest", help="Independent held-out JSONL (recommended)")
+    parser.add_argument("--dev-teacher", help="Streaming verifier token trace for checkpoint selection")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Train on cumulative two-second chunk events")
+    parser.add_argument("--chunk-seconds", type=float, default=2.0,
+                        help="Streaming trigger interval; default 2.0 seconds")
     parser.add_argument("--output", required=True, help="New, empty run directory")
     parser.add_argument("--dev-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
@@ -57,8 +64,14 @@ def precompute(records, cache_dir, encoder, processor, device, backend, rank, wo
     import torch
 
     for index in range(rank, len(records), world):
-        features = encode_audio(encoder, processor.feature_extractor,
-                                records[index]["audio"], device, backend)
+        end_sample = records[index].get("end_sample")
+        if end_sample is None:
+            features = encode_audio(encoder, processor.feature_extractor,
+                                    records[index]["audio"], device, backend)
+        else:
+            features = encode_audio(encoder, processor.feature_extractor,
+                                    records[index]["audio"], device, backend,
+                                    end_sample=end_sample)
         torch.save({"features": features}, cache_dir / f"{index:06d}.pt")
         if rank == 0 and index % max(world * 20, 1) == 0:
             print(f"encoded {index + 1}/{len(records)} clips", flush=True)
@@ -118,7 +131,9 @@ def evaluate(head, cache_dir, train_count, records, tokens, tokenizer, vocabular
             texts.append(text)
             rows.append({"audio": record["audio"], "reference": record["text"],
                          "draft": text, "reference_token_ids": tokens[index],
-                         "draft_token_ids": ids})
+                         "draft_token_ids": ids,
+                         **({"end_sample": record["end_sample"]}
+                            if "end_sample" in record else {})})
     return (evaluate_predictions(predictions, tokens[train_count:], texts,
                                  [r["text"] for r in records], vocabulary), rows)
 
@@ -127,11 +142,13 @@ def main() -> None:
     import torch
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
-    from transformers import AutoTokenizer
-
     args = arguments()
-    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
-        raise ValueError("epochs, batch size and learning rate must be positive")
+    from transformers import AutoTokenizer
+    if (args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0
+            or args.chunk_seconds <= 0):
+        raise ValueError("epochs, batch size, learning rate and chunk seconds must be positive")
+    if args.dev_teacher and not args.streaming:
+        raise ValueError("--dev-teacher requires --streaming")
     output = Path(args.output).resolve()
     rank = int(os.getenv("RANK", "0"))
     world = int(os.getenv("WORLD_SIZE", "1"))
@@ -149,22 +166,30 @@ def main() -> None:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
+    chunk_samples = int(round(args.chunk_seconds * 16000))
+    if args.streaming:
+        load_records = lambda path, minimum: load_stream_manifest(
+            path, chunk_samples, min_streams=minimum)
+    else:
+        load_records = lambda path, minimum: load_manifest(path, min_records=minimum)
     if args.dev_manifest:
-        train_records = load_manifest(args.manifest, min_records=1)
-        dev_records = load_manifest(args.dev_manifest, min_records=1)
+        train_records = load_records(args.manifest, 1)
+        dev_records = load_records(args.dev_manifest, 1)
         train_paths = {os.path.normcase(row["audio"]) for row in train_records}
         if train_paths & {os.path.normcase(row["audio"]) for row in dev_records}:
             raise ValueError("train and dev manifests contain overlapping audio paths")
     else:
-        records = load_manifest(args.manifest)
-        train_records, dev_records = split_records(records, args.dev_fraction, args.seed)
+        records = load_records(args.manifest, 2)
+        splitter = split_stream_records if args.streaming else split_records
+        train_records, dev_records = splitter(records, args.dev_fraction, args.seed)
     if len(train_records) < world:
         raise ValueError(f"need at least {world} training clips for {world} ranks")
     ordered_records = train_records + dev_records
+    dev_teacher = read_rows(Path(args.dev_teacher)) if args.dev_teacher and rank == 0 else None
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     all_tokens = [tokenizer.encode(row["text"], add_special_tokens=False)
                   for row in ordered_records]
-    if any(not row for row in all_tokens):
+    if not args.streaming and any(not row for row in all_tokens):
         raise ValueError("at least one transcript became empty after tokenization")
     vocabulary = build_vocabulary(all_tokens[:len(train_records)])
     cache_dir = output / "features"
@@ -208,7 +233,7 @@ def main() -> None:
     train_indices = list(range(len(train_records)))
     loader, sampler = make_loader(train_indices, all_tokens, cache_dir, vocabulary,
                                   args.batch_size, rank, world, True, args.seed)
-    best_error = float("inf")
+    best_score = None
 
     for epoch in range(1, args.epochs + 1):
         if sampler is not None:
@@ -236,16 +261,23 @@ def main() -> None:
         if rank == 0:
             metrics, rows = evaluate(head_module, cache_dir, len(train_records),
                                      dev_records, all_tokens, tokenizer, vocabulary, device)
+            if dev_teacher is not None:
+                metrics.update(score_rows(rows, dev_teacher))
             metrics.update({"epoch": epoch, "train_loss": loss_sum / steps})
             with (output / "history.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
             print(json.dumps(metrics, ensure_ascii=False), flush=True)
-            if metrics["token_error_rate"] < best_error:
-                best_error = metrics["token_error_rate"]
+            score = ((metrics["mean_accepted_at_4"], metrics["prefix_match_rate"],
+                      -metrics["token_error_rate"]) if dev_teacher is not None
+                     else (-metrics["token_error_rate"],))
+            if best_score is None or score > best_score:
+                best_score = score
                 torch.save({"head": {key: value.detach().cpu()
                                       for key, value in head_module.state_dict().items()},
                             "hidden_size": hidden_size, "vocabulary": vocabulary,
                             "model": args.model, "backend": args.backend,
+                            "streaming": args.streaming,
+                            "chunk_seconds": args.chunk_seconds if args.streaming else None,
                             "epoch": epoch}, output / "best_head.pt")
                 (output / "best_metrics.json").write_text(
                     json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"

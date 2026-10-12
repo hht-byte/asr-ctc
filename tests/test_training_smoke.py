@@ -70,8 +70,60 @@ class TrainingSmokeTests(unittest.TestCase):
                     self.assertEqual(tuple(encoder.kwargs["input_features"].shape),
                                      (1, 128, 100))
 
+    def test_encoder_only_sees_audio_at_current_chunk_boundary(self):
+        import numpy as np
+        import torch
+        from model_io import encode_audio
+
+        soundfile = types.ModuleType("soundfile")
+        soundfile.read = lambda *args, **kwargs: (np.ones(48000, dtype=np.float32), 16000)
+        seen = []
+
+        def extractor(audios, **kwargs):
+            seen.append(len(audios[0]))
+            return {"input_features": torch.zeros(1, 128, 100),
+                    "attention_mask": torch.ones(1, 100, dtype=torch.long)}
+
+        class Encoder:
+            dtype = torch.float32
+
+            def __call__(self, **kwargs):
+                return types.SimpleNamespace(last_hidden_state=torch.ones(13, 4))
+
+        with patch.dict(sys.modules, {"soundfile": soundfile}):
+            encode_audio(Encoder(), extractor, "unused.wav", "cpu", "hf",
+                         end_sample=32000)
+            self.assertEqual(seen, [32000])
+            with self.assertRaisesRegex(ValueError, "exceeds audio length"):
+                encode_audio(Encoder(), extractor, "unused.wav", "cpu", "hf",
+                             end_sample=64000)
+
+    def test_waveform_encoder_reuses_loaded_audio_for_streaming(self):
+        import numpy as np
+        import torch
+        from model_io import encode_waveform
+
+        seen = []
+
+        def extractor(audios, **kwargs):
+            seen.append(len(audios[0]))
+            return {"input_features": torch.zeros(1, 128, 100),
+                    "attention_mask": torch.ones(1, 100, dtype=torch.long)}
+
+        class Encoder:
+            dtype = torch.float32
+
+            def __call__(self, **kwargs):
+                return types.SimpleNamespace(last_hidden_state=torch.ones(13, 4))
+
+        audio = np.ones(64000, dtype=np.float32)
+        encode_waveform(Encoder(), extractor, audio[:32000], "cpu", "hf")
+        encode_waveform(Encoder(), extractor, audio, "cpu", "hf")
+        self.assertEqual(seen, [32000, 64000])
+
     def test_one_cpu_epoch_writes_usable_head_and_metrics(self):
         import torch
+        import torch._dynamo  # Initialize before substituting a fake transformers module.
         import train
 
         class Tokenizer:
@@ -112,6 +164,70 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertEqual(checkpoint["vocabulary"], [None, ord("a"), ord("b")])
             self.assertEqual(metrics["samples"], 2)
             self.assertEqual(len((output / "best_predictions.jsonl").read_text().splitlines()), 2)
+
+    def test_one_streaming_epoch_keeps_chunk_identity_and_audio_cutoff(self):
+        import torch
+        import torch._dynamo
+        import train
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [ord(char) for char in text]
+
+            def decode(self, ids, **kwargs):
+                return "".join(chr(token) for token in ids)
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.AutoTokenizer = types.SimpleNamespace(
+            from_pretrained=lambda _: Tokenizer()
+        )
+        seen = []
+
+        def fake_encode(_, __, path, ___, backend, end_sample=None):
+            seen.append((Path(path).stem, end_sample))
+            return torch.ones(24, 4) * (end_sample / 32000)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            for name in ("a", "b", "c"):
+                (root / f"{name}.wav").write_bytes(b"fake")
+            for filename, names in (("train.jsonl", ("a", "b")),
+                                    ("dev.jsonl", ("c",))):
+                with (root / filename).open("w", encoding="utf-8") as stream:
+                    for name in names:
+                        for end, text in ((32000, "a"), (64000, "ab")):
+                            stream.write(json.dumps({"audio": f"{name}.wav",
+                                                     "end_sample": end,
+                                                     "text": text}) + "\n")
+            with (root / "dev_teacher.jsonl").open("w", encoding="utf-8") as stream:
+                for end, prefix, generated in ((32000, [], [ord("a")]),
+                                               (64000, [ord("a")], [ord("b")])):
+                    stream.write(json.dumps({"audio": str(root / "c.wav"),
+                                             "end_sample": end,
+                                             "prefix_token_ids": prefix,
+                                             "generated_token_ids": generated}) + "\n")
+            output = root / "run"
+            args = ["train.py", "--manifest", str(root / "train.jsonl"),
+                    "--dev-manifest", str(root / "dev.jsonl"),
+                    "--dev-teacher", str(root / "dev_teacher.jsonl"),
+                    "--output", str(output), "--streaming", "--epochs", "1",
+                    "--batch-size", "2", "--device", "cpu"]
+            with (patch.object(sys, "argv", args),
+                  patch.dict(sys.modules, {"transformers": fake_transformers}),
+                  patch.object(train, "load_encoder", return_value=(
+                      object(), types.SimpleNamespace(feature_extractor=object()), 4)),
+                  patch.object(train, "encode_audio", side_effect=fake_encode)):
+                train.main()
+            self.assertEqual(seen, [("a", 32000), ("a", 64000),
+                                    ("b", 32000), ("b", 64000),
+                                    ("c", 32000), ("c", 64000)])
+            rows = [json.loads(line) for line in
+                    (output / "best_predictions.jsonl").read_text().splitlines()]
+            self.assertEqual([row["end_sample"] for row in rows], [32000, 64000])
+            self.assertEqual(json.loads((output / "run.json").read_text())
+                             ["config"]["streaming"], True)
+            metrics = json.loads((output / "best_metrics.json").read_text())
+            self.assertIn("mean_accepted_at_4", metrics)
 
 
 if __name__ == "__main__":
