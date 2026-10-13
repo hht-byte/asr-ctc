@@ -44,7 +44,7 @@ python -c 'import sys, torch, qwen_asr; print(sys.executable); print(sys.prefix)
 export PYTHON_EXEC="$(python -c 'import sys; print(sys.executable)')"
 ```
 
-HF 后端的导入检查应使用 `transformers`，无需 `qwen_asr`。详见 [解释器不一致排障](TROUBLESHOOTING.md)。
+HF 后端的导入检查应使用 `transformers`，无需 `qwen_asr`。解释器不一致，以及 `qwen-asr 0.0.6 + transformers 5.5.4` 初始化时缺少 `thinker_config` 的局部修复与配置检查，见 [训练启动排障](TROUBLESHOOTING.md)。
 
 按**录音/说话人/会话**先划分训练集与验证集，再分别保存整段录音清单；两份清单不能包含相同录音。下面四个阶段可顺序运行。第 1 阶段使用官方 Qwen vLLM 流式方法，需要安装 `qwen-asr[vllm]` 和可用的 Ascend vLLM 环境；第 2、3 阶段运行冻结编码器和 CTC 头。
 
