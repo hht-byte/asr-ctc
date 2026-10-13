@@ -4,6 +4,8 @@
 
 ## 环境和数据
 
+**现成小数据集：** 已提供 AISHELL-1 中文流式试验数据的固定版本配方、下载脚本和离线校验，见 [DATASET.md](DATASET.md)。其中 `*_full.jsonl` 是人工整句标注；流式训练前须在目标 Qwen 环境运行 teacher 采集。
+
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
 
 - `--backend qwen`：原始 Qwen checkpoint；按 [Qwen 官方安装说明](https://github.com/QwenLM/Qwen3-ASR) 安装 `qwen-asr`，再安装 `soundfile`、`numpy`。

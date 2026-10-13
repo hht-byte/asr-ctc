@@ -4,3 +4,8 @@ __pycache__/
 *.jsonl
 !tests/*.jsonl
 run-*/
+data/
+*.wav
+*.tar.gz
+*.zip
+*.partial

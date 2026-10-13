@@ -1,0 +1,56 @@
+{
+  "chunk_seconds": 2.0,
+  "splits": {
+    "train": {
+      "recordings": 256,
+      "speakers": [
+        "S0002",
+        "S0003",
+        "S0011",
+        "S0013",
+        "S0014",
+        "S0016",
+        "S0052",
+        "S0067"
+      ],
+      "audio_seconds": 1851.4592,
+      "min_seconds": 6.0,
+      "max_seconds": 11.8869375,
+      "full_2s_triggers": 828,
+      "third_and_later_triggers": 316,
+      "excluded_tail_seconds": 195.4592,
+      "cumulative_encoder_input_seconds": 3572
+    },
+    "dev": {
+      "recordings": 64,
+      "speakers": [
+        "S0012",
+        "S0080"
+      ],
+      "audio_seconds": 448.671,
+      "min_seconds": 6.0,
+      "max_seconds": 8.649875,
+      "full_2s_triggers": 202,
+      "third_and_later_triggers": 74,
+      "excluded_tail_seconds": 44.671,
+      "cumulative_encoder_input_seconds": 848
+    },
+    "test": {
+      "recordings": 64,
+      "speakers": [
+        "S0015",
+        "S0075"
+      ],
+      "audio_seconds": 437.2433,
+      "min_seconds": 6.0,
+      "max_seconds": 8.4819375,
+      "full_2s_triggers": 196,
+      "third_and_later_triggers": 68,
+      "excluded_tail_seconds": 45.2433,
+      "cumulative_encoder_input_seconds": 800
+    }
+  },
+  "source": "https://huggingface.co/datasets/AISHELL/AISHELL-1",
+  "revision": "bbe295d530192a4cd41644b711c9aecd087df653",
+  "split_policy": "custom speaker-disjoint pilot; not official AISHELL benchmark splits"
+}

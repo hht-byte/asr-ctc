@@ -1,0 +1,128 @@
+{
+  "dataset": "AISHELL/AISHELL-1",
+  "revision": "bbe295d530192a4cd41644b711c9aecd087df653",
+  "seed": 42,
+  "per_speaker": 32,
+  "min_seconds": 6,
+  "max_seconds": 30,
+  "speakers": {
+    "train": [
+      "S0002",
+      "S0003",
+      "S0011",
+      "S0052",
+      "S0067",
+      "S0013",
+      "S0014",
+      "S0016"
+    ],
+    "dev": [
+      "S0080",
+      "S0012"
+    ],
+    "test": [
+      "S0075",
+      "S0015"
+    ]
+  },
+  "files": [
+    {
+      "name": "S0002.tar.gz",
+      "path": "data_aishell/wav/S0002.tar.gz",
+      "size": 36455331,
+      "sha256": "5700ffa081f42c5a1be701147e680490fa494db959ca3c10ae205c3658af159f",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0002.tar.gz?download=true"
+    },
+    {
+      "name": "S0003.tar.gz",
+      "path": "data_aishell/wav/S0003.tar.gz",
+      "size": 42385634,
+      "sha256": "c15938c88bcdd0f5b2ad4b64862d2bdd0a577fdb966777aceb84572aea105517",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0003.tar.gz?download=true"
+    },
+    {
+      "name": "S0011.tar.gz",
+      "path": "data_aishell/wav/S0011.tar.gz",
+      "size": 34740794,
+      "sha256": "887f0ac40f1fcbeee96283fe140bf57ca7b1401f476618cc4229a6d2b25d8fc5",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0011.tar.gz?download=true"
+    },
+    {
+      "name": "S0052.tar.gz",
+      "path": "data_aishell/wav/S0052.tar.gz",
+      "size": 36151747,
+      "sha256": "47b39c197c6eac0a4d7842e25039f2d763fa1ec5cbc14fcee31d5626e808c458",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0052.tar.gz?download=true"
+    },
+    {
+      "name": "S0067.tar.gz",
+      "path": "data_aishell/wav/S0067.tar.gz",
+      "size": 38771053,
+      "sha256": "9aa6c5478c8dc2453ba052f055070b8c0ee89319564f6b8ec7ef1b08d5dad23b",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0067.tar.gz?download=true"
+    },
+    {
+      "name": "S0013.tar.gz",
+      "path": "data_aishell/wav/S0013.tar.gz",
+      "size": 44549302,
+      "sha256": "06a3f73739af34e2baf4da13480fe473e77703dd6757775b9d10ae32bf9ee728",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0013.tar.gz?download=true"
+    },
+    {
+      "name": "S0014.tar.gz",
+      "path": "data_aishell/wav/S0014.tar.gz",
+      "size": 54668640,
+      "sha256": "afe5141addf482ab718036795136d0fa710f8cc9b7881cbf47da4535b2bf37d1",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0014.tar.gz?download=true"
+    },
+    {
+      "name": "S0016.tar.gz",
+      "path": "data_aishell/wav/S0016.tar.gz",
+      "size": 48270025,
+      "sha256": "917d662f6d0c5efe35d3a560a8e72b5fbe934105a615a9f5c97ae688d6a0b4ba",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0016.tar.gz?download=true"
+    },
+    {
+      "name": "S0080.tar.gz",
+      "path": "data_aishell/wav/S0080.tar.gz",
+      "size": 39924079,
+      "sha256": "f557dd5f89936095b6dfd87eafc5acfb479a065699da91e1e9a26427ee96e7ff",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0080.tar.gz?download=true"
+    },
+    {
+      "name": "S0012.tar.gz",
+      "path": "data_aishell/wav/S0012.tar.gz",
+      "size": 44520905,
+      "sha256": "af572911303fe3cf1a53550a68e3df7f5a975dbcf77f6378244c930547522004",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0012.tar.gz?download=true"
+    },
+    {
+      "name": "S0075.tar.gz",
+      "path": "data_aishell/wav/S0075.tar.gz",
+      "size": 39638975,
+      "sha256": "e985259e6e6b88e7dbbe2c4d7b68ff93efb34df8b95ae81a78f6762ea5f0a4ad",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0075.tar.gz?download=true"
+    },
+    {
+      "name": "S0015.tar.gz",
+      "path": "data_aishell/wav/S0015.tar.gz",
+      "size": 42485842,
+      "sha256": "96c21aa80b630fa12420d6fd0b4e55b6db33273674b0e0b188439c5a0fdc2a41",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/wav/S0015.tar.gz?download=true"
+    },
+    {
+      "name": "aishell_transcript_v0.8.txt",
+      "path": "data_aishell/transcript/aishell_transcript_v0.8.txt",
+      "size": 10091431,
+      "sha256": "b5f33b9e0b47548e20a5ea4e504297f80df41d559133924c4e5b7b544c15b5c4",
+      "url": "https://huggingface.co/datasets/AISHELL/AISHELL-1/resolve/bbe295d530192a4cd41644b711c9aecd087df653/data_aishell/transcript/aishell_transcript_v0.8.txt"
+    },
+    {
+      "name": "LICENSE-AISHELL-1.txt",
+      "path": null,
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+    }
+  ]
+}
