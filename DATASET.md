@@ -78,8 +78,11 @@ done
 
 ## 3. 8 卡训练与独立测试
 
+在能成功导入 `qwen_asr` 的 Python 环境中启动，显式固定 worker 解释器；裸 `torchrun` 可能来自系统环境，详见 [排障说明](TROUBLESHOOTING.md)。
+
 ```bash
-torchrun --standalone --nproc_per_node=8 train.py \
+export PYTHON_EXEC="$(python -c 'import sys; print(sys.executable)')"
+python -m torch.distributed.run --standalone --nproc_per_node=8 train.py \
   --streaming --chunk-seconds 2.0 --backend qwen \
   --target-token-source recorded --selection-metric hybrid --verify-budget 8 \
   --model /models/Qwen3-ASR-1.7B \

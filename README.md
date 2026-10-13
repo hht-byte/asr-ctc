@@ -37,6 +37,15 @@ python probe_encoder.py --backend qwen --model /models/Qwen3-ASR-1.7B \
 
 ## 2 秒流式主试验
 
+多进程训练使用当前环境的 `python -m torch.distributed.run`。启动前确认该 Python 能导入 `qwen_asr`（原始模型后端），并固定 worker 解释器，避免 PATH 中系统 `torchrun` 或遗留 `PYTHON_EXEC` 指向其他环境：
+
+```bash
+python -c 'import sys, torch, qwen_asr; print(sys.executable); print(sys.prefix); print(torch.__file__); print(qwen_asr.__file__)'
+export PYTHON_EXEC="$(python -c 'import sys; print(sys.executable)')"
+```
+
+HF 后端的导入检查应使用 `transformers`，无需 `qwen_asr`。详见 [解释器不一致排障](TROUBLESHOOTING.md)。
+
 按**录音/说话人/会话**先划分训练集与验证集，再分别保存整段录音清单；两份清单不能包含相同录音。下面四个阶段可顺序运行。第 1 阶段使用官方 Qwen vLLM 流式方法，需要安装 `qwen-asr[vllm]` 和可用的 Ascend vLLM 环境；第 2、3 阶段运行冻结编码器和 CTC 头。
 
 1. **采集每次 2 秒触发的 teacher 轨迹。** `--language` 强制文本输出，避免语言标记混进目标 token。采集脚本调用官方 `streaming_transcribe()`，读取它每次传给 vLLM 的 prompt 和实际 `generated token_ids`，分别写出逐 chunk 转写和 teacher token 轨迹。脚本仅处理完整 2 秒 chunk，录音末尾不足 2 秒的 `finish_streaming_transcribe()` 暂不纳入主试验。
@@ -57,7 +66,7 @@ python collect_teacher.py --model /models/Qwen3-ASR-1.7B \
 2. **用 8 卡缓存每个累计音频前缀并训练 CTC 头。** 每个事件的编码器输入严格截到 `end_sample`；同一录音的事件不会跨训练和验证集。事件数会显著多于录音数，可先用约 100–300 条训练录音和 30–50 条独立验证录音试跑。
 
 ```bash
-torchrun --standalone --nproc_per_node=8 train.py \
+python -m torch.distributed.run --standalone --nproc_per_node=8 train.py \
   --streaming --chunk-seconds 2.0 --backend qwen \
   --target-token-source recorded --selection-metric hybrid --verify-budget 8 \
   --model /models/Qwen3-ASR-1.7B \
@@ -96,7 +105,7 @@ python score_teacher.py \
 每卡负责约八分之一的音频编码和特征缓存。所有卡随后用 DDP 训练同一个小型线性头；每个 epoch 不再重复跑冻结编码器。CTC loss 在 CPU 上计算，梯度会回传到 NPU 线性头；这是优先保证可移植性的试验实现，性能须实测。8 卡训练每轮最多丢弃 7 条不足一组的样本，逐轮洗牌后可轮换覆盖；小于 8 条训练音频会直接报错。
 
 ```bash
-torchrun --standalone --nproc_per_node=8 train.py \
+python -m torch.distributed.run --standalone --nproc_per_node=8 train.py \
   --backend qwen --model /models/Qwen3-ASR-1.7B \
   --manifest /data/ctc/train.jsonl \
   --dev-manifest /data/ctc/dev.jsonl \
@@ -104,7 +113,7 @@ torchrun --standalone --nproc_per_node=8 train.py \
   --device npu --epochs 15 --batch-size 8 --learning-rate 3e-4
 ```
 
-没有独立验证清单时，可省略 `--dev-manifest`，程序用 `--dev-fraction 0.2 --seed 42` 按音频随机切分；这个便捷方式**不会**保证说话人或会话隔离。单卡 CPU 冒烟运行将 `torchrun ...` 换成 `python train.py ... --device cpu`，但 1.7B 模型本身会很慢。每次运行需要新的空 `--output` 目录，避免混用旧缓存。输出包括 `run.json`、`history.jsonl`、`best_head.pt`、`best_metrics.json` 和 `best_predictions.jsonl`。
+没有独立验证清单时，可省略 `--dev-manifest`，程序用 `--dev-fraction 0.2 --seed 42` 按音频随机切分；这个便捷方式**不会**保证说话人或会话隔离。单卡 CPU 冒烟运行使用 `python train.py ... --device cpu`，但 1.7B 模型本身会很慢。每次运行需要新的空 `--output` 目录，避免混用旧缓存。输出包括 `run.json`、`history.jsonl`、`best_head.pt`、`best_metrics.json` 和 `best_predictions.jsonl`。
 
 ## 整句草稿与判定
 
