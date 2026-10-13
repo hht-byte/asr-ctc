@@ -81,6 +81,7 @@ done
 ```bash
 torchrun --standalone --nproc_per_node=8 train.py \
   --streaming --chunk-seconds 2.0 --backend qwen \
+  --target-token-source recorded --selection-metric hybrid --verify-budget 8 \
   --model /models/Qwen3-ASR-1.7B \
   --manifest /data/ctc-traces/train_events.jsonl \
   --dev-manifest /data/ctc-traces/dev_events.jsonl \
@@ -96,10 +97,11 @@ python stream_draft.py \
 python score_teacher.py \
   --drafts /data/ctc-runs/aishell-pilot-001/test_drafts.jsonl \
   --teacher /data/ctc-traces/test_teacher.jsonl \
+  --require-rollback --verify-budget 8 \
   --output /data/ctc-runs/aishell-pilot-001/test_metrics.json
 ```
 
-先看 loss 是否下降、验证未见 token 比率、`prefix_match_rate`、`mean_accepted_at_4/8`，尤其第 3 次及之后触发。dev 用来选模型；不要根据 test 反复调参。8 卡的收益主要取决于特征缓存阶段，需实测。
+按 [回滚复用协议](ROLLBACK.md)，第 1 轮无草稿，第 2 轮完整复用，第 3 轮起复用回滚尾部。CTC 仅尝试延长旧草稿。先看 loss、验证未见 token 比率和 `rollback_comparison.after_first.mean_delta_accepted_at_8`，再看第 3 次及之后分组。dev 用来选模型；不要根据 test 反复调参。已有音频包不变，若已采集旧版轨迹，需改用新的输出文件名重新采集 v2 teacher/events。8 卡的收益主要取决于特征缓存阶段，需实测。
 
 ## 适用范围
 

@@ -41,6 +41,11 @@ def load_stream_manifest(path: str | Path, chunk_samples: int = 32000,
             last_end[key] = end
             events.append({"audio": str(audio), "end_sample": end,
                            "text": row["text"]})
+            if "target_token_ids" in row:
+                ids = row["target_token_ids"]
+                if not isinstance(ids, list) or any(type(t) is not int or t < 0 for t in ids):
+                    raise ValueError(f"{manifest}:{number}: invalid target_token_ids")
+                events[-1]["target_token_ids"] = ids
     if len(last_end) < min_streams:
         raise ValueError(f"manifest needs at least {min_streams} recordings")
     return events
@@ -69,6 +74,7 @@ def streaming_teacher_metrics(
     full_drafts: Sequence[Sequence[int]],
     stable_prefixes: Sequence[Sequence[int]],
     teacher_suffixes: Sequence[Sequence[int]],
+    budgets: Sequence[int] = (1, 2, 4, 8),
 ) -> dict[str, float | int]:
     count = len(full_drafts)
     if not count or len(stable_prefixes) != count or len(teacher_suffixes) != count:
@@ -83,7 +89,9 @@ def streaming_teacher_metrics(
         "mean_candidate_tokens": sum(len(candidate or []) for candidate in candidates) / count,
         "mean_accepted_tokens": sum(accepted) / count,
     }
-    for length in (1, 2, 4, 8):
+    for length in sorted(set(budgets)):
+        if type(length) is not int or length < 1:
+            raise ValueError("verification budgets must be positive integers")
         result[f"mean_accepted_at_{length}"] = sum(min(value, length) for value in accepted) / count
         result[f"accept_at_least_{length}_rate"] = sum(value >= length for value in accepted) / count
     return result

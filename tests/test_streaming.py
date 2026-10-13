@@ -127,8 +127,8 @@ class StreamingTests(unittest.TestCase):
         class Model:
             def generate(self, inputs, **kwargs):
                 end = len(inputs[0]["multi_modal_data"]["audio"][0])
-                token = 65 if end == 32000 else 66
-                output = SimpleNamespace(token_ids=[token, 99], text=chr(token))
+                ids = [65] if end == 32000 else [65, 66]
+                output = SimpleNamespace(token_ids=ids + [99], text="".join(map(chr, ids)))
                 return [SimpleNamespace(outputs=[output])]
 
         class ASR:
@@ -139,7 +139,7 @@ class StreamingTests(unittest.TestCase):
                 return SimpleNamespace(prompt_raw="P:", text="", chunk_id=0)
 
             def streaming_transcribe(self, chunk, state):
-                prefix = "" if state.chunk_id == 0 else "A"
+                prefix = ""
                 self.model.generate([{"prompt": state.prompt_raw + prefix,
                                       "multi_modal_data": {"audio": [np.ones(
                                           (state.chunk_id + 1) * 32000)]}}])
@@ -151,8 +151,9 @@ class StreamingTests(unittest.TestCase):
                                                  "a.wav", "Chinese", 2, 5)
         self.assertEqual([row["end_sample"] for row in events], [32000, 64000])
         self.assertEqual([row["text"] for row in events], ["A", "AB"])
-        self.assertEqual(teachers[1]["prefix_token_ids"], [65])
-        self.assertEqual(teachers[1]["generated_token_ids"], [66])
+        self.assertEqual(teachers[1]["prefix_token_ids"], [])
+        self.assertEqual(teachers[1]["generated_token_ids"], [65, 66])
+        self.assertEqual(teachers[1]["old_draft_token_ids"], [65])
 
 
 if __name__ == "__main__":

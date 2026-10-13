@@ -28,6 +28,12 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True, help="JSONL with audio and text fields")
     parser.add_argument("--dev-manifest", help="Independent held-out JSONL (recommended)")
     parser.add_argument("--dev-teacher", help="Streaming verifier token trace for checkpoint selection")
+    parser.add_argument("--target-token-source", choices=("auto", "recorded", "text"), default="auto",
+                        help="auto uses recorded target IDs when all rows have them")
+    parser.add_argument("--selection-metric", choices=("auto", "hybrid", "ctc"), default="auto",
+                        help="auto selects incremental hybrid gain with v2 traces, CTC with legacy traces")
+    parser.add_argument("--verify-budget", type=int, default=8,
+                        help="Candidate token budget used for checkpoint selection")
     parser.add_argument("--streaming", action="store_true",
                         help="Train on cumulative two-second chunk events")
     parser.add_argument("--chunk-seconds", type=float, default=2.0,
@@ -40,6 +46,53 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--device", choices=("auto", "cpu", "npu"), default="auto")
     return parser.parse_args()
+
+
+def select_targets(records, tokenizer, source):
+    present = ["target_token_ids" in row for row in records]
+    if source == "auto":
+        if any(present) and not all(present):
+            raise ValueError("mixed recorded/text targets; recollect manifests or explicitly choose text")
+        source = "recorded" if all(present) else "text"
+    if source == "recorded":
+        if not all(present):
+            raise ValueError("recorded targets require target_token_ids in every train/dev event")
+        tokens = [row["target_token_ids"] for row in records]
+        if any(not isinstance(ids, list) or any(type(t) is not int or t < 0 for t in ids)
+               for ids in tokens):
+            raise ValueError("invalid recorded target token IDs")
+        return tokens, source
+    return [tokenizer.encode(row["text"], add_special_tokens=False) for row in records], "text"
+
+
+def checkpoint_score(metrics, mode, budget):
+    if mode == "auto":
+        mode = ("hybrid" if "rollback_comparison" in metrics else
+                "ctc" if "mean_accepted_tokens" in metrics else "token_error_rate")
+    if mode == "hybrid":
+        if "rollback_comparison" not in metrics:
+            raise ValueError("hybrid selection needs schema_version 2 teacher traces")
+        after = metrics["rollback_comparison"]["after_first"]
+        if not after["events"]:
+            raise ValueError("hybrid selection needs second or later chunk events")
+        return ((after[f"mean_delta_accepted_at_{budget}"],
+                 after[f"hybrid_mean_accepted_at_{budget}"],
+                 -metrics["token_error_rate"]), mode)
+    if mode == "ctc":
+        key = f"mean_accepted_at_{budget}"
+        if key not in metrics:
+            raise ValueError("CTC selection needs teacher metrics at the selected budget")
+        return ((metrics[key], metrics["prefix_match_rate"], -metrics["token_error_rate"]), mode)
+    return ((-metrics["token_error_rate"],), mode)
+
+
+def select_dev_teacher(teachers, dev_records, auto_split):
+    if not auto_split:
+        return teachers
+    # A full-manifest teacher file is expected with automatic recording splits.
+    # Select whole recordings, never individual events that could hide gaps.
+    dev_paths = {row["audio"] for row in dev_records}
+    return [row for row in teachers if row.get("audio") in dev_paths]
 
 
 def select_device(requested: str, local_rank: int) -> str:
@@ -145,10 +198,12 @@ def main() -> None:
     args = arguments()
     from transformers import AutoTokenizer
     if (args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0
-            or args.chunk_seconds <= 0):
+            or args.chunk_seconds <= 0 or args.verify_budget < 1):
         raise ValueError("epochs, batch size, learning rate and chunk seconds must be positive")
     if args.dev_teacher and not args.streaming:
         raise ValueError("--dev-teacher requires --streaming")
+    if args.selection_metric != "auto" and not args.dev_teacher:
+        raise ValueError("explicit --selection-metric requires --dev-teacher")
     output = Path(args.output).resolve()
     rank = int(os.getenv("RANK", "0"))
     world = int(os.getenv("WORLD_SIZE", "1"))
@@ -185,10 +240,28 @@ def main() -> None:
     if len(train_records) < world:
         raise ValueError(f"need at least {world} training clips for {world} ranks")
     ordered_records = train_records + dev_records
-    dev_teacher = read_rows(Path(args.dev_teacher)) if args.dev_teacher and rank == 0 else None
+    dev_teacher = read_rows(Path(args.dev_teacher)) if args.dev_teacher else None
+    if dev_teacher is not None:
+        dev_teacher = select_dev_teacher(dev_teacher, dev_records, auto_split=not args.dev_manifest)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    all_tokens = [tokenizer.encode(row["text"], add_special_tokens=False)
-                  for row in ordered_records]
+    all_tokens, target_source = select_targets(ordered_records, tokenizer, args.target_token_source)
+    selection_mode = "token_error_rate"
+    if dev_teacher is not None:
+        # Fail before loading the encoder, on every rank, for incompatible/incomplete traces.
+        probe_rows = [{"audio": r["audio"], "end_sample": r["end_sample"],
+                       "draft_token_ids": []} for r in dev_records]
+        probe_metrics = score_rows(probe_rows, dev_teacher,
+                                   require_rollback=args.selection_metric == "hybrid",
+                                   verify_budget=args.verify_budget)
+        _, selection_mode = checkpoint_score({**probe_metrics, "token_error_rate": 0},
+                                               args.selection_metric, args.verify_budget)
+        if selection_mode == "hybrid":
+            if target_source != "recorded":
+                raise ValueError("hybrid selection requires recorded target_token_ids in train/dev events")
+            by_key = {(r["audio"], r["end_sample"]): r for r in dev_teacher}
+            for row, ids in zip(dev_records, all_tokens[len(train_records):]):
+                if ids != by_key[(row["audio"], row["end_sample"])]["target_token_ids"]:
+                    raise ValueError("dev event target IDs differ from teacher trace")
     if not args.streaming and any(not row for row in all_tokens):
         raise ValueError("at least one transcript became empty after tokenization")
     vocabulary = build_vocabulary(all_tokens[:len(train_records)])
@@ -199,6 +272,7 @@ def main() -> None:
             "model": args.model, "seed": args.seed, "train_samples": len(train_records),
             "dev_samples": len(dev_records), "world_size": world,
             "vocabulary": vocabulary,
+            "target_token_source": target_source, "selection_metric": selection_mode,
             "split": {"train": train_records, "dev": dev_records},
             "config": vars(args),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -262,14 +336,12 @@ def main() -> None:
             metrics, rows = evaluate(head_module, cache_dir, len(train_records),
                                      dev_records, all_tokens, tokenizer, vocabulary, device)
             if dev_teacher is not None:
-                metrics.update(score_rows(rows, dev_teacher))
+                metrics.update(score_rows(rows, dev_teacher, verify_budget=args.verify_budget))
             metrics.update({"epoch": epoch, "train_loss": loss_sum / steps})
             with (output / "history.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
             print(json.dumps(metrics, ensure_ascii=False), flush=True)
-            score = ((metrics["mean_accepted_at_4"], metrics["prefix_match_rate"],
-                      -metrics["token_error_rate"]) if dev_teacher is not None
-                     else (-metrics["token_error_rate"],))
+            score, selected_mode = checkpoint_score(metrics, args.selection_metric, args.verify_budget)
             if best_score is None or score > best_score:
                 best_score = score
                 torch.save({"head": {key: value.detach().cpu()
@@ -278,6 +350,8 @@ def main() -> None:
                             "model": args.model, "backend": args.backend,
                             "streaming": args.streaming,
                             "chunk_seconds": args.chunk_seconds if args.streaming else None,
+                            "selection_metric": selected_mode, "verify_budget": args.verify_budget,
+                            "target_token_source": target_source,
                             "epoch": epoch}, output / "best_head.pt")
                 (output / "best_metrics.json").write_text(
                     json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"

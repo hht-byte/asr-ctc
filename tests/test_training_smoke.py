@@ -198,12 +198,19 @@ class TrainingSmokeTests(unittest.TestCase):
                         for end, text in ((32000, "a"), (64000, "ab")):
                             stream.write(json.dumps({"audio": f"{name}.wav",
                                                      "end_sample": end,
-                                                     "text": text}) + "\n")
+                                                     "text": text,
+                                                     "target_token_ids": [120] if end == 32000 else [120, 121]}) + "\n")
             with (root / "dev_teacher.jsonl").open("w", encoding="utf-8") as stream:
-                for end, prefix, generated in ((32000, [], [ord("a")]),
-                                               (64000, [ord("a")], [ord("b")])):
+                for end, prefix, generated in ((32000, [], [120]),
+                                               (64000, [], [120, 121])):
                     stream.write(json.dumps({"audio": str(root / "c.wav"),
                                              "end_sample": end,
+                                             "schema_version": 2,
+                                             "chunk_index": end // 32000, "chunk_samples": 32000,
+                                             "previous_token_ids": [] if end == 32000 else [120],
+                                             "old_draft_token_ids": [] if end == 32000 else [120],
+                                             "old_prefix_match": True,
+                                             "target_token_ids": prefix + generated,
                                              "prefix_token_ids": prefix,
                                              "generated_token_ids": generated}) + "\n")
             output = root / "run"
@@ -211,6 +218,7 @@ class TrainingSmokeTests(unittest.TestCase):
                     "--dev-manifest", str(root / "dev.jsonl"),
                     "--dev-teacher", str(root / "dev_teacher.jsonl"),
                     "--output", str(output), "--streaming", "--epochs", "1",
+                    "--selection-metric", "hybrid", "--target-token-source", "recorded",
                     "--batch-size", "2", "--device", "cpu"]
             with (patch.object(sys, "argv", args),
                   patch.dict(sys.modules, {"transformers": fake_transformers}),
@@ -228,6 +236,10 @@ class TrainingSmokeTests(unittest.TestCase):
                              ["config"]["streaming"], True)
             metrics = json.loads((output / "best_metrics.json").read_text())
             self.assertIn("mean_accepted_at_4", metrics)
+            self.assertEqual(metrics["rollback_comparison"]["after_first"]["events"], 1)
+            checkpoint = torch.load(output / "best_head.pt", weights_only=True)
+            self.assertEqual(checkpoint["vocabulary"], [None, 120, 121])
+            self.assertEqual(checkpoint["selection_metric"], "hybrid")
 
 
 if __name__ == "__main__":

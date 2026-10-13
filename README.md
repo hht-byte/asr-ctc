@@ -4,6 +4,8 @@
 
 ## 环境和数据
 
+**回滚复用协议已更新：** 第 1 轮无草稿，第 2 轮复用上一轮完整输出，第 3 轮起复用回滚尾部；CTC 从第 2 轮起仅尝试延长旧草稿。训练保留完整累计序列 CTC loss，使用采集的实际 token ID；按相对旧草稿的增量接受量选模。详细协议、指标及兼容性见 [ROLLBACK.md](ROLLBACK.md)。已有音频包可继续使用，旧版 teacher/events 需重新采集。
+
 **现成小数据集：** 已提供 AISHELL-1 中文流式试验数据的固定版本配方、下载脚本和离线校验，见 [DATASET.md](DATASET.md)。其中 `*_full.jsonl` 是人工整句标注；流式训练前须在目标 Qwen 环境运行 teacher 采集。
 
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
@@ -50,13 +52,14 @@ python collect_teacher.py --model /models/Qwen3-ASR-1.7B \
   --teacher-out /data/ctc/dev_teacher.jsonl
 ```
 
-`*_events.jsonl` 的每行是 `{"audio":"/abs/a.wav","end_sample":32000,"text":"当前累计转写"}`，接着是同一录音的 `64000`、`96000` 等。`text` 来自该次 teacher 流式输出，可能在下个 chunk 被修订，因此它是蒸馏目标，不等于人工标注。`*_teacher.jsonl` 同时记录同一事件的 `prefix_token_ids`（回滚后 prompt 的文本前缀）和 `generated_token_ids`（vLLM 该次实际输出的内容 token）。如线上使用不同的 `unfixed_chunk_num` 或 `unfixed_token_num`，采集时用对应参数；默认是 2 和 5。
+`*_events.jsonl` 保存音频、累计截止采样点、当前文本，以及 `target_token_ids`（实际稳定前缀 ID + 当前实际生成 ID）。`text` 来自该次 teacher 流式输出，可能在下个 chunk 被修订，因此是蒸馏目标，不等于人工标注。新版 `*_teacher.jsonl` 使用 `schema_version: 2`，还保存上一轮输出、旧草稿和 chunk 序号。前两轮稳定前缀为空，第 2 轮完整复用第 1 轮输出；第 3 轮起复用实际回滚尾部。`unfixed_chunk_num` 固定为 2；`unfixed_token_num` 默认 5，按线上回滚长度设置。
 
 2. **用 8 卡缓存每个累计音频前缀并训练 CTC 头。** 每个事件的编码器输入严格截到 `end_sample`；同一录音的事件不会跨训练和验证集。事件数会显著多于录音数，可先用约 100–300 条训练录音和 30–50 条独立验证录音试跑。
 
 ```bash
 torchrun --standalone --nproc_per_node=8 train.py \
   --streaming --chunk-seconds 2.0 --backend qwen \
+  --target-token-source recorded --selection-metric hybrid --verify-budget 8 \
   --model /models/Qwen3-ASR-1.7B \
   --manifest /data/ctc/train_events.jsonl \
   --dev-manifest /data/ctc/dev_events.jsonl \
@@ -65,7 +68,7 @@ torchrun --standalone --nproc_per_node=8 train.py \
   --epochs 15 --batch-size 8 --learning-rate 3e-4
 ```
 
-提供 `--dev-teacher` 时，每个 epoch 都统计流式前缀指标，并优先按 `mean_accepted_at_4` 选择 `best_head.pt`；未提供时退回逐 chunk token 错误率选模。验证轨迹用于选模，因此若要给出无偏的最终结果，应另留一份未参与选模的测试录音。
+使用新版 teacher 和 `--selection-metric hybrid` 时，按 `rollback_comparison.after_first.mean_delta_accepted_at_8` 选择 `best_head.pt`，相同时比较组合接受量、再比较 token 错误率。第 1 轮不参与组合收益选模；验证预算可通过 `--verify-budget` 修改。`auto` 对新版轨迹自动使用组合指标，对旧轨迹仍使用 CTC 单独指标；无 teacher 时按 token 错误率选模。验证用于选模，最终结果应另留独立测试录音。
 
 3. **按真实触发顺序重放验证集。** 音频文件只读取一次；每次用累计音频重新运行编码器和 CTC，记录 `encoder_head_ms` 与 `head_ms`。前者包括特征提取、编码器、CPU/NPU 传输和 CTC 头，后者包括缓存特征送入 CTC 头的传输与计算。两者都不包括 vLLM verifier；如果线上能复用目标模型已经算出的编码器输出，`head_ms` 更接近分支增量开销，但跨运行时共享所需的搬运和同步还要单独测量。
 
@@ -76,16 +79,17 @@ python stream_draft.py \
   --output /data/ctc/runs/stream-001/stream_drafts.jsonl --device npu
 ```
 
-4. **与相同 chunk 的 teacher 后缀比较。** 只有 CTC 完整草稿的开头与当次回滚后稳定前缀 token **完全一致**，才会提出剩余草稿作为 verifier 候选；不一致时该次候选为空，防止把已确认前缀之外的错误 token 送入验证。报告给出前缀匹配率、平均候选长度、平均可接受 token、截断到 1/2/4/8 token 的接受量、首次/第二次/之后触发的分组结果，以及编码器加 CTC 超过 2 秒 chunk 预算的比例。
+4. **与仅回滚复用比较。** 第 1 轮两种策略都无草稿；第 2 轮起仅当 CTC 完整输出与“稳定前缀 + 旧草稿”逐 token 一致时，追加剩余 CTC token，否则保持旧草稿。报告 `rollback_comparison` 比较相同预算下旧草稿、CTC 单独和组合候选的接受量、增量及第 1/2/3+ 轮分组。顶层旧版 CTC 指标仍作为诊断保留，不代表部署策略。若稳定前缀无法从上一轮实际 ID 序列切出，该轮禁用旧草稿与延长并报告前缀不可复用。
 
 ```bash
 python score_teacher.py \
   --drafts /data/ctc/runs/stream-001/stream_drafts.jsonl \
   --teacher /data/ctc/dev_teacher.jsonl \
+  --require-rollback --verify-budget 8 \
   --output /data/ctc/runs/stream-001/teacher_prefix.json
 ```
 
-这份报告比整句 token 错误率更接近目标场景，但仍不是推测解码真实接受率：CTC 编码器与 vLLM decoder 的 tokenizer 边界可能不同，当前实现只用**完全一致的 token 前缀**提候选；也尚未把 CTC 输出接入 verifier、测 rejection/KV 回滚或比较完整端到端时延。若 `prefix_match_rate` 很低，先检查 token 化和稳定前缀拼接，而不要仅增加训练轮次。若 `mean_accepted_at_4/8` 不高，或编码器加 CTC 的时间已接近 2 秒预算，优先停止扩大试验。
+该报告是相同 prompt 下贪心解码的单次验证代理指标，不含 target bonus token、EOS 和后续验证轮次，也尚未把 CTC 接入真实 verifier 或测 KV 回滚与端到端时延。原始 CTC 输出仍逐轮计算用于诊断，但组合策略第 1 轮不提出任何草稿。先看 `after_first.mean_delta_accepted_at_8`、`extension_proposed_rate`、`old_prefix_reusable_rate`；旧草稿占满预算时，追加部分本次不会被验证，不能据此认定后续验证轮次没有收益。
 
 ## 整句对照基线
 

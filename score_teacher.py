@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ctc_pilot import teacher_prefix_metrics
 from streaming_ctc import streaming_teacher_metrics
+from rollback_ctc import rollback_metrics, validate_rollback_traces
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -15,9 +16,12 @@ def read_rows(path: Path) -> list[dict]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def score_rows(drafts: list[dict], teachers: list[dict]) -> dict:
+def score_rows(drafts: list[dict], teachers: list[dict], *,
+               require_rollback: bool = False, verify_budget: int = 8) -> dict:
     if not drafts or not teachers:
         raise ValueError("draft and teacher files must be nonempty")
+    if type(verify_budget) is not int or verify_budget < 1:
+        raise ValueError("verify_budget must be a positive integer")
     streaming = "end_sample" in drafts[0]
     if any(("end_sample" in row) != streaming for row in drafts + teachers):
         raise ValueError("draft and teacher rows must use the same streaming schema")
@@ -40,6 +44,9 @@ def score_rows(drafts: list[dict], teachers: list[dict]) -> dict:
     aligned = []
     seen = set()
     for row in drafts:
+        ids = row.get("draft_token_ids")
+        if not isinstance(ids, list) or any(type(t) is not int or t < 0 for t in ids):
+            raise ValueError("draft rows need nonnegative integer draft_token_ids")
         key = (row.get("audio"), row.get("end_sample") if streaming else None)
         if key in seen:
             raise ValueError(f"duplicate draft event: {key}")
@@ -47,13 +54,25 @@ def score_rows(drafts: list[dict], teachers: list[dict]) -> dict:
         if key not in teacher_by_event:
             raise ValueError(f"missing teacher tokens for draft event: {key}")
         aligned.append(teacher_by_event[key])
+    if seen != set(teacher_by_event):
+        raise ValueError("draft/teacher event coverage must match exactly")
+    versioned = [row.get("schema_version") == 2 for row in teachers]
+    if any(versioned) and not all(versioned):
+        raise ValueError("mixed legacy and rollback teacher traces; recollect complete histories")
+    if require_rollback and (not streaming or not all(versioned)):
+        raise ValueError("rollback comparison requires schema_version 2 teacher traces")
+    if streaming and all(versioned):
+        validate_rollback_traces(teachers)
     if streaming:
         full_drafts = [row["draft_token_ids"] for row in drafts]
         prefixes = [row["prefix_token_ids"] for row in aligned]
         suffixes = [row["generated_token_ids"] for row in aligned]
         metrics = streaming_teacher_metrics(
-            full_drafts, prefixes, suffixes,
+            full_drafts, prefixes, suffixes, budgets=(1, 2, 4, 8, verify_budget),
         )
+        if all(versioned):
+            metrics["rollback_comparison"] = rollback_metrics(
+                full_drafts, aligned, budgets=(1, 2, 4, 8, verify_budget))
         ends_by_audio = {}
         for row in drafts:
             ends_by_audio.setdefault(row["audio"], []).append(row["end_sample"])
@@ -67,7 +86,7 @@ def score_rows(drafts: list[dict], teachers: list[dict]) -> dict:
         metrics["by_trigger"] = {
             name: streaming_teacher_metrics(
                 [full_drafts[i] for i in indices], [prefixes[i] for i in indices],
-                [suffixes[i] for i in indices])
+                [suffixes[i] for i in indices], budgets=(1, 2, 4, 8, verify_budget))
             for name, indices in groups.items() if indices
         }
         latency_rows = ["encoder_head_ms" in row for row in drafts]
@@ -96,11 +115,16 @@ def main() -> None:
     parser.add_argument("--teacher", required=True,
                         help="JSONL: audio, token_ids (content tokens only)")
     parser.add_argument("--output", help="Optional JSON report path")
+    parser.add_argument("--require-rollback", action="store_true",
+                        help="Reject legacy traces without previous-output history")
+    parser.add_argument("--verify-budget", type=int, default=8,
+                        help="Additional single-verification budget to report")
     args = parser.parse_args()
 
     drafts = read_rows(Path(args.drafts))
     teachers = read_rows(Path(args.teacher))
-    metrics = score_rows(drafts, teachers)
+    metrics = score_rows(drafts, teachers, require_rollback=args.require_rollback,
+                         verify_budget=args.verify_budget)
     report = json.dumps(metrics, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(report + "\n", encoding="utf-8")
