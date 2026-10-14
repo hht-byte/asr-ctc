@@ -17,21 +17,14 @@ def load_encoder(model_path: str, device: str, backend: str = "hf"):
         )
         encoder = model.model.audio_tower
         hidden_size = int(model.config.audio_config.d_model)
+        del model
     elif backend == "qwen":
-        from qwen_asr import Qwen3ASRModel
+        from qwen_audio import load_qwen_audio
 
-        wrapper = Qwen3ASRModel.from_pretrained(
-            model_path, dtype=torch.bfloat16, device_map=None
-        )
-        model = wrapper.model
-        processor = wrapper.processor
-        encoder = model.thinker.audio_tower
-        hidden_size = int(model.config.thinker_config.audio_config.output_dim)
-        del wrapper
+        encoder, processor, hidden_size = load_qwen_audio(model_path)
     else:
         raise ValueError(f"unknown backend: {backend}")
     encoder.requires_grad_(False).eval()
-    del model  # The decoder and projector are never used by the CTC experiment.
     return encoder.to(device), processor, hidden_size
 
 

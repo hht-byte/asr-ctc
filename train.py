@@ -196,7 +196,11 @@ def main() -> None:
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
     args = arguments()
-    from transformers import AutoTokenizer
+    if args.backend == "qwen":
+        # Avoid AutoTokenizer's composite AutoConfig construction on TF 5.x.
+        from transformers import Qwen2TokenizerFast as TokenizerClass
+    else:
+        from transformers import AutoTokenizer as TokenizerClass
     if (args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0
             or args.chunk_seconds <= 0 or args.verify_budget < 1):
         raise ValueError("epochs, batch size, learning rate and chunk seconds must be positive")
@@ -243,7 +247,7 @@ def main() -> None:
     dev_teacher = read_rows(Path(args.dev_teacher)) if args.dev_teacher else None
     if dev_teacher is not None:
         dev_teacher = select_dev_teacher(dev_teacher, dev_records, auto_split=not args.dev_manifest)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = TokenizerClass.from_pretrained(args.model)
     all_tokens, target_source = select_targets(ordered_records, tokenizer, args.target_token_source)
     selection_mode = "token_error_rate"
     if dev_teacher is not None:

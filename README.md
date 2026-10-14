@@ -10,7 +10,7 @@
 
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
 
-- `--backend qwen`：原始 Qwen checkpoint；按 [Qwen 官方安装说明](https://github.com/QwenLM/Qwen3-ASR) 安装 `qwen-asr`，再安装 `soundfile`、`numpy`。
+- `--backend qwen`：原始 Qwen checkpoint；按 [Qwen 官方安装说明](https://github.com/QwenLM/Qwen3-ASR) 安装 `qwen-asr`，再安装 `soundfile`、`numpy`、`safetensors`。CTC 路径直接构造官方音频编码器，严格加载 `thinker.audio_tower.*` 权重；不构造文本解码器。支持原始单文件或带索引的分片 safetensors。
 - `--backend hf`：原生 `-hf` checkpoint；[模型卡](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf)要求 `transformers>=5.13.0`，安装方式如下。不要在同一环境强行混装与其不兼容的 `qwen-asr` 版本。
 
 ```bash
@@ -33,7 +33,7 @@ python probe_encoder.py --backend qwen --model /models/Qwen3-ASR-1.7B \
   --audio /data/ctc/train/001.wav --device npu
 ```
 
-预期输出 `encoder_frozen: true`、正的 `frames`，并且 `hidden_size` 与模型编码器输出一致。若使用 `-hf` 模型，将 `--backend` 改为 `hf` 并提供对应模型路径。
+预期输出 `encoder_frozen: true`、正的 `frames`，并且 `hidden_size` 与模型编码器输出一致。原始 Qwen 后端还输出 `encoder_only: true`、`text_decoder_loaded: false` 和实际加载的 `loaded_audio_tensors`；公开 1.7B checkpoint 为 397 个。若使用 `-hf` 模型，将 `--backend` 改为 `hf` 并提供对应模型路径。
 
 ## 2 秒流式主试验
 
@@ -44,7 +44,7 @@ python -c 'import sys, torch, qwen_asr; print(sys.executable); print(sys.prefix)
 export PYTHON_EXEC="$(python -c 'import sys; print(sys.executable)')"
 ```
 
-HF 后端的导入检查应使用 `transformers`，无需 `qwen_asr`。解释器不一致，以及 `qwen-asr 0.0.6 + transformers 5.5.4` 初始化时缺少 `thinker_config` 的局部修复与配置检查，见 [训练启动排障](TROUBLESHOOTING.md)。
+HF 后端的导入检查应使用 `transformers`，无需 `qwen_asr`。解释器不一致、`thinker_config` 初始化错误及文本 RoPE `KeyError: 'default'`，见 [训练启动排障](TROUBLESHOOTING.md)。新版 CTC 加载路径绕过复合配置和文本模型的构造，不需要继续修改文本 RoPE；这不代表完整 Qwen/vLLM 推理已兼容任意 Transformers 版本。
 
 按**录音/说话人/会话**先划分训练集与验证集，再分别保存整段录音清单；两份清单不能包含相同录音。下面四个阶段可顺序运行。第 1 阶段使用官方 Qwen vLLM 流式方法，需要安装 `qwen-asr[vllm]` 和可用的 Ascend vLLM 环境；第 2、3 阶段运行冻结编码器和 CTC 头。
 

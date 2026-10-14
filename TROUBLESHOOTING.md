@@ -29,7 +29,33 @@ PYTHON_EXEC="$ASR_PY" "$ASR_PY" -m torch.distributed.run \
 
 [PyTorch 官方文档](https://docs.pytorch.org/docs/stable/elastic/run.html)说明 `torchrun` 等价于 `python -m torch.distributed.run`，worker 默认使用 launcher 的 `sys.executable`，也可由 `PYTHON_EXEC` 覆盖。上述命令同时固定两者，不需要为了解决解释器选错而重装整套 PyTorch/CANN。
 
+## Transformers 5.5.4：文本 RoPE 报 KeyError: 'default'
+
+若配置初始化后，traceback 到达 `Qwen3ASRThinkerTextRotaryEmbedding` 的 `ROPE_INIT_FUNCTIONS[self.rope_type]` 并报 `KeyError: 'default'`，这是另一个文本模型 API 兼容问题。[Qwen 代码](https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/core/transformers_backend/modeling_qwen3_asr.py)查找 `default` 初始化函数，而 [Transformers 5.5.4 的注册表](https://github.com/huggingface/transformers/blob/v5.5.4/src/transformers/modeling_rope_utils.py)已不包含该项。前面的 `Unrecognized keys in rope_parameters` 是警告，本次中止点是这个字典查找。
+
+新版 `--backend qwen` 的 CTC 加载路径直接读取原始 checkpoint 的 `thinker_config.audio_config`，构造官方 `Qwen3ASRAudioEncoder`，通过 safetensors 逐个加载 `thinker.audio_tower.*` 张量，包括编码器内部的 `proj1/proj2`。它不再调用 `Qwen3ASRModel.from_pretrained()`，也不构造根配置、thinker 或文本模型。所有音频权重键、形状和浮点类型必须匹配；缺失或多余的音频权重会报错，不会带着随机权重继续训练。
+
+预处理器直接加载同一 checkpoint 的 `WhisperFeatureExtractor` 和 `Qwen2TokenizerFast`。训练 tokenizer 同样直接加载，避免 `AutoTokenizer` 再次创建复合配置。音频仍按原有累计前缀输入，CTC loss、teacher token ID 和回滚草稿协议不变。
+
+更新仓库后，用原来失败的单卡 probe 重试即可，不必再打 RoPE 补丁，也不必为此降级整个 vLLM/Ascend 环境：
+
+```bash
+git pull --ff-only
+ASR_PY=/path/to/myenv/bin/python
+MODEL=/models/Qwen3-ASR-1.7B
+"$ASR_PY" probe_encoder.py --backend qwen --model "$MODEL" \
+  --audio /path/to/actual-16khz.wav --device npu
+```
+
+成功结果包含 `encoder_only: true`、`text_decoder_loaded: false`、`encoder_frozen: true`；公开 1.7B 模型还应有 `loaded_audio_tensors: 397`、`hidden_size: 2048` 和正的 `frames`。通过后再以同一解释器启动八卡训练，使用新的空输出目录。
+
+验证范围：已在 Transformers 5.5.4 / Hub 1.27.0 下核对公开 1.7B 配置对应的全部 397 个音频权重键；官方 tokenizer 的测试文本 ID 与 AutoTokenizer 一致，2 秒输入得到 `[1,128,200]` 特征。使用官方 0.0.6 音频类定义、缩小配置和合成权重，在 CPU BF16 下验证加载前后前向结果逐元素相同。为隔离下载版源码中的文本装饰器兼容问题，该本地测试只执行音频相关类定义，没有验证整个 `qwen_asr` 包导入。你的环境已能导入该包；真实 1.7B 权重、Python 3.12、PyTorch 2.10 / NPU 和八卡运行仍需设备验证。
+
+该修复仅覆盖本仓库 CTC 的 encoder 加载，不修改 teacher 采集或线上 vLLM 的完整模型路径。之前应用的配置初始化补丁可保留；新版 CTC 路径不依赖它。完整模型若仍需 Transformers 兼容修复，应独立验证。
+
 ## Transformers 5.5.4：配置缺少 thinker_config
+
+**新版 CTC 路径已绕过复合配置初始化。** 先更新仓库并运行上面的单卡 probe。以下保留之前的配置诊断与恢复方法，单独通过此检查不能证明完整模型加载成功。
 
 已复现组合：`qwen-asr 0.0.6` 的公开配置源码、`transformers 5.5.4`、`huggingface-hub 1.27.0`。典型调用链是 `super().__init__` → `validate_token_ids` → `get_text_config` → `AttributeError: 'Qwen3ASRConfig' object has no attribute 'thinker_config'`。
 

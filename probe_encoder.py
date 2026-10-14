@@ -24,7 +24,8 @@ def main() -> None:
         raise RuntimeError("Encoder dimension or frozen-parameter check failed")
     print(json.dumps({"backend": args.backend, "device": device,
                       "frames": states.shape[0], "hidden_size": hidden_size,
-                      "encoder_frozen": True}, ensure_ascii=False))
+                      "encoder_frozen": True,
+                      **getattr(encoder, "ctc_load_info", {})}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
