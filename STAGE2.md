@@ -22,7 +22,7 @@ python prepare_aishell.py build --download \
 ```
 
 - 固定同一 AISHELL 镜像 revision，所有源文件按长度和 SHA256 校验。
-- 训练扩大到 **64 位说话人**，保留原训练 8 位，取每位所有符合 6–30 秒条件的录音。
+- 训练从 **64 位候选说话人**中筛选，包含原训练 8 位，取每位所有符合 6–30 秒条件及去重规则的录音。候选不保证有合格样本；零样本训练候选会打印提示并跳过。实际纳入人数以 `stats.json` 的 `splits.train.speakers` 为准，`training_speaker_selection` 列出候选、纳入和跳过的说话人。
 - **dev/test 仍是原来的各 64 条录音**。配方嵌入原选择规则，先还原原 holdout，再排除扩大训练集与 holdout 重复的转写、音频哈希及说话人。
 - 源文件总量约 **2.53 GB**（2,533,381,795 字节），已有缓存可复用。这是源压缩包大小，解包空间另计。
 - 实际训练录音数、时长和 chunk 数以生成的 `stats.json` 为准；本次交付的是可复现配方，未预先生成扩大版音频或 teacher 标签。
@@ -35,6 +35,8 @@ python prepare_aishell.py verify data/aishell-ctc-expanded
 ```
 
 这是镜像内自定义划分，仍不是 AISHELL 官方 benchmark；朗读短句也不能代替业务域长会话。
+
+若旧脚本报 `S0004: only 0 eligible recordings; need 1`，更新代码后复用同一缓存重跑 build 即可；缓存完整时可去掉 `--download`。该异常发生在创建输出目录之前，无需删除缓存。修复仅允许 `train_per_speaker: 0` 的训练候选为空；整个训练集为空、固定数量采样不足或原 holdout 无法还原仍会报错。不要降低 6 秒筛选阈值来绕过异常。
 
 ## 2. 采集 train/dev 的真实 token 轨迹
 
@@ -71,7 +73,7 @@ python audit_coverage.py \
 
 这个审计不加载模型，词表只从 **train 的 recorded token IDs** 构建。它报告 token OOV、完整序列可表示率、非空序列首 token 可表示率及前 8 个 token 的连续词表覆盖长度，并检查重复事件和 train/dev 同路径音频。
 
-`5%` 是本轮人为设定的筛查门槛，不是理论阈值，也不保证 CTC 可用。OOV 超标时退出码为 2，仍保存报告；训练入口也可在加载 encoder 前拦截。64 位说话人能否达到门槛，须以实际采集结果为准。超标则先增加独立训练语料或检查标签来源，**不要把 dev/test token 加入训练词表**。覆盖指标只说明能否表示，不代表预测准确或可被 teacher 接受。
+`5%` 是本轮人为设定的筛查门槛，不是理论阈值，也不保证 CTC 可用。OOV 超标时退出码为 2，仍保存报告；训练入口也可在加载 encoder 前拦截。筛选出的训练集能否达到门槛，须以实际采集结果为准。超标则先增加独立训练语料或检查标签来源，**不要把 dev/test token 加入训练词表**。覆盖指标只说明能否表示，不代表预测准确或可被 teacher 接受。
 
 ## 4. 8 卡训练，显式预算更新步数
 

@@ -147,10 +147,17 @@ def choose_records(cache, recipe):
                 f"{recipe['seed']}:{row['utterance_id']}".encode()).hexdigest())
             limit = train_limit if split == "train" else recipe["per_speaker"]
             chosen = candidates[:limit] if limit else candidates
-            if len(chosen) < (limit or 1):
+            if limit and len(chosen) < limit:
                 raise ValueError(f"{speaker}: only {len(chosen)} eligible recordings; "
-                                 f"need {limit or 1}")
+                                 f"need {limit}")
+            if not chosen:
+                # Only train_per_speaker=0 permits this; fixed-count splits
+                # (including the frozen holdout recipe) stay strict above.
+                print(f"Skipping training candidate {speaker}: 0 eligible recordings "
+                      "after transcript, duration and holdout-overlap filters", flush=True)
             rows.extend(chosen)
+        if not rows:
+            raise ValueError(f"{split}: no eligible recordings across requested speakers")
         selected[split] = sorted(rows, key=lambda row: row["utterance_id"])
         prior_texts.update(row["text"] for row in rows)
         prior_hashes.update(row["sha256"] for row in rows)
@@ -193,6 +200,11 @@ def build_dataset(cache, output, recipe):
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
     write_json(output / "recipe.json", recipe)
     report = summarize(selected)
+    included = report["splits"]["train"]["speakers"]
+    report["training_speaker_selection"] = {
+        "requested": recipe["speakers"]["train"], "included": included,
+        "skipped_zero_eligible": [s for s in recipe["speakers"]["train"] if s not in included],
+    }
     report["source"] = "https://huggingface.co/datasets/AISHELL/AISHELL-1"
     report["revision"] = recipe["revision"]
     report["split_policy"] = "custom speaker-disjoint pilot; not official AISHELL benchmark splits"

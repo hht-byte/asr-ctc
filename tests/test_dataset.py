@@ -12,7 +12,7 @@ from prepare_aishell import build_dataset, verify_dataset, verify_source, choose
 
 
 class DatasetTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, include_short_candidate=False):
         cache = root / "cache"
         cache.mkdir()
         recipe = {"revision": "fixture", "seed": 42, "per_speaker": 1,
@@ -20,11 +20,11 @@ class DatasetTests(unittest.TestCase):
                   "speakers": {"train": ["S0001"], "dev": ["S0002"],
                                "test": ["S0003"]}, "files": []}
         transcript = []
-        for index in range(1, 4):
+        for index in range(1, 5 if include_short_candidate else 4):
             speaker = f"S{index:04d}"
             archive = cache / f"{speaker}.tar.gz"
             with tarfile.open(archive, "w:gz") as tar:
-                for j, duration in enumerate((2, 6.1, 8.1)):
+                for j, duration in enumerate((2,) if index == 4 else (2, 6.1, 8.1)):
                     uid = f"BAC009{speaker}W{j:04d}"
                     transcript.append(f"{uid} 测 试 {index} {j}")
                     data = io.BytesIO()
@@ -107,6 +107,44 @@ class DatasetTests(unittest.TestCase):
             result = choose_records(cache, expanded)
             self.assertEqual([r["utterance_id"] for r in result["train"]], [chosen_id])
             self.assertEqual(result["dev"], selected["dev"])
+
+    def test_all_eligible_skips_empty_training_candidate_and_reports_actual_speakers(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            cache, recipe = self.fixture(root, include_short_candidate=True)
+            build_dataset(cache, root / "base", recipe)
+            expanded = {**recipe, "train_per_speaker": 0,
+                        "speakers": {**recipe["speakers"], "train": ["S0004", "S0001"]},
+                        "frozen_holdout_recipe": recipe}
+            report = build_dataset(cache, root / "expanded", expanded)
+            self.assertEqual(report["splits"]["train"]["speakers"], ["S0001"])
+            self.assertEqual(report["splits"]["train"]["recordings"], 2)
+            self.assertEqual(report["training_speaker_selection"], {
+                "requested": ["S0004", "S0001"], "included": ["S0001"],
+                "skipped_zero_eligible": ["S0004"]})
+            for split in ("dev", "test"):
+                self.assertEqual((root / "base" / f"{split}_full.jsonl").read_bytes(),
+                                 (root / "expanded" / f"{split}_full.jsonl").read_bytes())
+
+    def test_all_eligible_rejects_entirely_empty_training_before_output(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            cache, recipe = self.fixture(root, include_short_candidate=True)
+            expanded = {**recipe, "train_per_speaker": 0,
+                        "speakers": {**recipe["speakers"], "train": ["S0004"]},
+                        "frozen_holdout_recipe": recipe}
+            with self.assertRaisesRegex(ValueError, "train: no eligible recordings"):
+                build_dataset(cache, root / "out", expanded)
+            self.assertFalse((root / "out").exists())
+
+    def test_fixed_training_count_still_rejects_empty_speaker(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            cache, recipe = self.fixture(root, include_short_candidate=True)
+            recipe["speakers"]["train"].append("S0004")
+            with self.assertRaisesRegex(ValueError, "S0004: only 0 eligible recordings; need 1"):
+                build_dataset(cache, root / "out", recipe)
+            self.assertFalse((root / "out").exists())
 
     def test_speaker_overlap_fails_before_output(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

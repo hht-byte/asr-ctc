@@ -10,7 +10,7 @@
 
 **训练子集也无法识别时：** 可用 `overfit_cached.py` 在单卡复用已有 encoder 缓存，按更新步数诊断小样本是否能拟合；无需重新编码音频，见 [缓存特征过拟合诊断](TROUBLESHOOTING.md)。
 
-**扩大训练与覆盖审计：** 已增加保留原 dev/test 的 64 位训练说话人配方、recorded token OOV 审计、按 optimizer 步数训练和固定训练子集指标。下一轮完整命令见 [STAGE2.md](STAGE2.md)。
+**扩大训练与覆盖审计：** 已增加保留原 dev/test 的 64 位候选训练说话人配方（实际纳入人数以筛选统计为准）、recorded token OOV 审计、按 optimizer 步数训练和固定训练子集指标。下一轮完整命令见 [STAGE2.md](STAGE2.md)。
 
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
 
