@@ -1,5 +1,34 @@
 # 训练启动排障
 
+## 训练样本也识别很差：先做缓存特征过拟合诊断
+
+若选中的模型在训练子集上 token/字符错误率接近 100%，且训练子集 OOV 为 0，词表覆盖不足不是唯一问题。仅凭早期 checkpoint 的这个结果，不能证明最后一轮也没学会，更不能直接判断冻结 encoder 路线不可行。
+
+小数据配八卡时应检查更新次数。例如 828 个训练事件、8 卡、每卡 batch=8，当前 sampler 每卡每轮取 103 个事件，DataLoader 每轮更新 13 次；15 轮共 195 次，第 2 轮 checkpoint 只有 26 次更新。`train_samples` 是累计音频事件数，不是独立录音数。
+
+`overfit_cached.py` 只读取已有 `run.json` 中的训练划分、recorded 目标 ID 和 `features/` 缓存。不加载 encoder、tokenizer 或音频，不访问 dev/test 缓存；保留原始完整 CTC 词表，随机选取完整训练录音，重新初始化同形状线性头，并使用与主训练相同的 AdamW 和 CPU CTCLoss（梯度回传到设备）。它用于检验少量训练样本的可学习性，不是正式重新训练或选模。
+
+```bash
+python overfit_cached.py \
+  --run data/ctc-runs/aishell-pilot-004 \
+  --output data/ctc-runs/aishell-overfit-001 \
+  --device npu --recordings 8 --steps 1000 \
+  --batch-size 8 --learning-rate 3e-4 --eval-every 50
+```
+
+请用能运行原训练脚本的 Python，单进程运行，不使用八卡 torchrun。输出目录必须新建或为空，原训练结果不会被覆盖。CPU 对照可改为 `--device cpu` 并使用另一个输出目录；相同 seed、参数和源缓存会使用相同样本、初始化及 batch 顺序。
+
+输出包括 `run.json`、`history.jsonl`、`summary.json`、`predictions.jsonl` 和仅供诊断的 `last_head.pt`。日志第 0 步是随机初始化基线，第 1 步及每次评测记录：
+
+- `token_error_rate`、`exact_sequence_rate`、`mean_prefix_tokens`：整个所选训练子集的识别指标。
+- `blank_frame_rate`：被 argmax 判为 blank 的帧比例；高 blank 比例需结合识别指标判断，CTC 本身允许大量 blank。
+- `batch_loss`：当前更新 batch 的 loss，不是整个子集的平均 loss。
+- `gradient_norm`、`weight_update_max_abs`：本次反向传播及权重变化；首步无梯度/无更新会直接报错。
+
+达到训练 token 错误率 ≤1% 且序列完全匹配率 ≥95% 时，标记 `memorized_subset` 并提前停止；否则到指定步数标记 `budget_exhausted`。这是诊断判据，不是模型质量或理论可行性的统一门槛。若预算耗尽，先看完整曲线、梯度、更新量、blank 比例和缓存特征统计，再决定继续训练或检查特征/标签/线性头容量。即使通过，也只证明该训练子集可以被拟合，不证明验证集泛化、910B 性能或投机加速收益。
+
+验证集 OOV 高时，应另行扩大独立训练数据并检查覆盖；不要把 dev/test 标签加入训练词表来改善评测，也不要把这个仅在训练子集上拟合的头用于部署。
+
 ## 单进程可导入 qwen_asr，八卡却 ModuleNotFoundError
 
 先对比成功命令和失败 worker 的 Python。虚拟环境中没有自己的 `torchrun` 入口时，shell 可能从 PATH 后面找到系统安装的入口；它的 shebang 会选择系统 Python，即使提示符显示已经激活虚拟环境。

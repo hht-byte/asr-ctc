@@ -8,6 +8,8 @@
 
 **现成小数据集：** 已提供 AISHELL-1 中文流式试验数据的固定版本配方、下载脚本和离线校验，见 [DATASET.md](DATASET.md)。其中 `*_full.jsonl` 是人工整句标注；流式训练前须在目标 Qwen 环境运行 teacher 采集。
 
+**训练子集也无法识别时：** 可用 `overfit_cached.py` 在单卡复用已有 encoder 缓存，按更新步数诊断小样本是否能拟合；无需重新编码音频，见 [缓存特征过拟合诊断](TROUBLESHOOTING.md)。
+
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
 
 - `--backend qwen`：原始 Qwen checkpoint；按 [Qwen 官方安装说明](https://github.com/QwenLM/Qwen3-ASR) 安装 `qwen-asr`，再安装 `soundfile`、`numpy`、`safetensors`。CTC 路径直接构造官方音频编码器，严格加载 `thinker.audio_tower.*` 权重；不构造文本解码器。支持原始单文件或带索引的分片 safetensors。
