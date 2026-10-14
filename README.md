@@ -10,6 +10,8 @@
 
 **训练子集也无法识别时：** 可用 `overfit_cached.py` 在单卡复用已有 encoder 缓存，按更新步数诊断小样本是否能拟合；无需重新编码音频，见 [缓存特征过拟合诊断](TROUBLESHOOTING.md)。
 
+**扩大训练与覆盖审计：** 已增加保留原 dev/test 的 64 位训练说话人配方、recorded token OOV 审计、按 optimizer 步数训练和固定训练子集指标。下一轮完整命令见 [STAGE2.md](STAGE2.md)。
+
 使用与 910B4 的 CANN 版本匹配的 PyTorch / `torch_npu`。两种模型格式使用**不同 Python 环境**：
 
 - `--backend qwen`：原始 Qwen checkpoint；按 [Qwen 官方安装说明](https://github.com/QwenLM/Qwen3-ASR) 安装 `qwen-asr`，再安装 `soundfile`、`numpy`、`safetensors`。CTC 路径直接构造官方音频编码器，严格加载 `thinker.audio_tower.*` 权重；不构造文本解码器。支持原始单文件或带索引的分片 safetensors。

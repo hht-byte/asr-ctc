@@ -87,6 +87,18 @@ def choose_records(cache, recipe):
     if (recipe["per_speaker"] < 1 or recipe["min_seconds"] < 6
             or recipe["max_seconds"] < recipe["min_seconds"]):
         raise ValueError("positive sample count and 6 <= min_seconds <= max_seconds required")
+    train_limit = recipe.get("train_per_speaker", recipe["per_speaker"])
+    if type(train_limit) is not int or train_limit < 0:
+        raise ValueError("train_per_speaker must be nonnegative; 0 means all eligible")
+    frozen = {}
+    if "frozen_holdout_recipe" in recipe:
+        base = recipe["frozen_holdout_recipe"]
+        if "frozen_holdout_recipe" in base or base["revision"] != recipe["revision"]:
+            raise ValueError("frozen holdout requires a flat recipe with the same source revision")
+        if any(base["speakers"][s] != recipe["speakers"][s] for s in ("dev", "test")):
+            raise ValueError("frozen holdout speakers must remain unchanged")
+        original = choose_records(cache, base)
+        frozen = {s: original[s] for s in ("dev", "test")}
     verify_source(cache, recipe)
     transcripts = {}
     for line in (cache / "aishell_transcript_v0.8.txt").read_text("utf-8").splitlines():
@@ -96,8 +108,13 @@ def choose_records(cache, recipe):
             if uid in transcripts and transcripts[uid] != text:
                 raise ValueError(f"conflicting transcript: {uid}")
             transcripts[uid] = text
-    selected, prior_texts, prior_hashes = {}, set(), set()
+    selected = {}
+    prior_texts = {r["text"] for rows in frozen.values() for r in rows}
+    prior_hashes = {r["sha256"] for rows in frozen.values() for r in rows}
     for split in SPLITS:
+        if split in frozen:
+            selected[split] = frozen[split]
+            continue
         rows = []
         for speaker in recipe["speakers"][split]:
             candidates = []
@@ -128,10 +145,11 @@ def choose_records(cache, recipe):
                                        "source_member": member.name})
             candidates.sort(key=lambda row: hashlib.sha256(
                 f"{recipe['seed']}:{row['utterance_id']}".encode()).hexdigest())
-            chosen = candidates[:recipe["per_speaker"]]
-            if len(chosen) < recipe["per_speaker"]:
+            limit = train_limit if split == "train" else recipe["per_speaker"]
+            chosen = candidates[:limit] if limit else candidates
+            if len(chosen) < (limit or 1):
                 raise ValueError(f"{speaker}: only {len(chosen)} eligible recordings; "
-                                 f"need {recipe['per_speaker']}")
+                                 f"need {limit or 1}")
             rows.extend(chosen)
         selected[split] = sorted(rows, key=lambda row: row["utterance_id"])
         prior_texts.update(row["text"] for row in rows)

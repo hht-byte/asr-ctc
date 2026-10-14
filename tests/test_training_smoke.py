@@ -165,6 +165,38 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertEqual(metrics["samples"], 2)
             self.assertEqual(len((output / "best_predictions.jsonl").read_text().splitlines()), 2)
 
+            # Step budget overrides epochs, and the last partial interval is evaluated.
+            output2 = root / "stepped"
+            args2 = args.copy()
+            args2[args2.index(str(output))] = str(output2)
+            args2 += ["--max-steps", "5", "--eval-every-steps", "2", "--train-eval-samples", "3"]
+            with (patch.object(sys, "argv", args2),
+                  patch.dict(sys.modules, {"transformers": fake_transformers}),
+                  patch.object(train, "load_encoder", return_value=(object(), fake_processor, 4)),
+                  patch.object(train, "encode_audio", side_effect=fake_encode)):
+                train.main()
+            history = [json.loads(x) for x in (output2 / "history.jsonl").read_text().splitlines()]
+            self.assertEqual([x["global_step"] for x in history], [2, 4, 5])
+            self.assertTrue(all(x["train_subset"]["samples"] == 3 for x in history))
+            self.assertEqual(json.loads((output2 / "run.json").read_text())["planned_optimizer_steps"], 5)
+
+            # OOV gate must fail before expensive encoder loading or cache writes.
+            train_manifest = root / "train-only.jsonl"
+            train_manifest.write_text(json.dumps({"audio": "0.wav", "text": "ab"}) + "\n")
+            dev_manifest = root / "dev-only.jsonl"
+            dev_manifest.write_text(json.dumps({"audio": "1.wav", "text": "z"}) + "\n")
+            blocked = root / "blocked"
+            gate_args = ["train.py", "--manifest", str(train_manifest),
+                         "--dev-manifest", str(dev_manifest), "--output", str(blocked),
+                         "--device", "cpu", "--max-dev-oov", "0.05"]
+            with (patch.object(sys, "argv", gate_args),
+                  patch.dict(sys.modules, {"transformers": fake_transformers}),
+                  patch.object(train, "load_encoder") as encoder_load,
+                  self.assertRaisesRegex(ValueError, "OOV")):
+                train.main()
+            encoder_load.assert_not_called()
+            self.assertFalse(blocked.exists())
+
     def test_one_streaming_epoch_keeps_chunk_identity_and_audio_cutoff(self):
         import torch
         import torch._dynamo

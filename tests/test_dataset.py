@@ -8,7 +8,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from prepare_aishell import build_dataset, verify_dataset, verify_source
+from prepare_aishell import build_dataset, verify_dataset, verify_source, choose_records
 
 
 class DatasetTests(unittest.TestCase):
@@ -75,6 +75,38 @@ class DatasetTests(unittest.TestCase):
             (cache / "S0001.tar.gz").write_bytes(b"corrupt")
             with self.assertRaisesRegex(ValueError, "checksum|size"):
                 verify_source(cache, recipe)
+
+    def test_expansion_freezes_original_holdouts_and_adds_training_audio(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            cache, recipe = self.fixture(root)
+            build_dataset(cache, root / "base", recipe)
+            expanded = {**recipe, "train_per_speaker": 0,
+                        "frozen_holdout_recipe": recipe}
+            report = build_dataset(cache, root / "expanded", expanded)
+            self.assertEqual(report["splits"]["train"]["recordings"], 2)
+            for split in ("dev", "test"):
+                self.assertEqual((root / "base" / f"{split}_full.jsonl").read_bytes(),
+                                 (root / "expanded" / f"{split}_full.jsonl").read_bytes())
+
+    def test_expanded_training_excludes_frozen_holdout_transcripts(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            cache, recipe = self.fixture(root)
+            selected = choose_records(cache, recipe)
+            chosen_id = selected["train"][0]["utterance_id"]
+            candidate_ids = {"BAC009S0001W0001", "BAC009S0001W0002"}
+            extra_id = (candidate_ids - {chosen_id}).pop()
+            transcript = cache / "aishell_transcript_v0.8.txt"
+            lines = transcript.read_text("utf-8").splitlines()
+            transcript.write_text("\n".join(
+                extra_id + " " + selected["dev"][0]["text"] if line.startswith(extra_id + " ") else line
+                for line in lines), encoding="utf-8")
+            recipe["files"][-1] = self.file_info(transcript)
+            expanded = {**recipe, "train_per_speaker": 0, "frozen_holdout_recipe": recipe}
+            result = choose_records(cache, expanded)
+            self.assertEqual([r["utterance_id"] for r in result["train"]], [chosen_id])
+            self.assertEqual(result["dev"], selected["dev"])
 
     def test_speaker_overlap_fails_before_output(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import random
 from pathlib import Path
@@ -17,6 +18,7 @@ from ctc_pilot import (build_vocabulary, collapse_ctc, evaluate_predictions,
 from model_io import encode_audio, load_encoder
 from score_teacher import read_rows, score_rows
 from streaming_ctc import load_stream_manifest, split_stream_records
+from audit_coverage import token_coverage
 
 
 def arguments() -> argparse.Namespace:
@@ -42,6 +44,12 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--dev-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--max-steps", type=int, help="Total optimizer updates; overrides epochs")
+    parser.add_argument("--eval-every-steps", type=int, help="Evaluate at this update interval and at the end")
+    parser.add_argument("--train-eval-samples", type=int, default=32,
+                        help="Fixed seeded subset of training events to score alongside dev; 0 disables")
+    parser.add_argument("--max-dev-oov", type=float,
+                        help="Optional dev token OOV ceiling in [0,1]; checked before encoding")
     parser.add_argument("--batch-size", type=int, default=8, help="Per device head batch size")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--device", choices=("auto", "cpu", "npu"), default="auto")
@@ -166,14 +174,18 @@ def make_loader(indices, all_tokens, cache_dir, vocabulary, batch_size,
     return loader, sampler
 
 
-def evaluate(head, cache_dir, train_count, records, tokens, tokenizer, vocabulary, device):
+def evaluate(head, cache_dir, train_count, records, tokens, tokenizer, vocabulary, device,
+             *, cache_indices=None):
     import torch
 
     head.eval()
     predictions, texts, rows = [], [], []
     with torch.inference_mode():
-        for offset, record in enumerate(records):
-            index = train_count + offset
+        indices = (list(range(train_count, train_count + len(records)))
+                   if cache_indices is None else cache_indices)
+        if len(indices) != len(records):
+            raise ValueError("cache indices must match evaluation records")
+        for index, record in zip(indices, records):
             features = torch.load(cache_dir / f"{index:06d}.pt", weights_only=True)["features"]
             logits = head(features.to(device=device, dtype=torch.float32))
             local_ids = logits.argmax(-1).cpu().tolist()
@@ -187,7 +199,7 @@ def evaluate(head, cache_dir, train_count, records, tokens, tokenizer, vocabular
                          "draft_token_ids": ids,
                          **({"end_sample": record["end_sample"]}
                             if "end_sample" in record else {})})
-    return (evaluate_predictions(predictions, tokens[train_count:], texts,
+    return (evaluate_predictions(predictions, [tokens[i] for i in indices], texts,
                                  [r["text"] for r in records], vocabulary), rows)
 
 
@@ -202,8 +214,13 @@ def main() -> None:
     else:
         from transformers import AutoTokenizer as TokenizerClass
     if (args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0
-            or args.chunk_seconds <= 0 or args.verify_budget < 1):
+            or args.chunk_seconds <= 0 or args.verify_budget < 1
+            or args.train_eval_samples < 0
+            or (args.max_steps is not None and args.max_steps < 1)
+            or (args.eval_every_steps is not None and args.eval_every_steps < 1)):
         raise ValueError("epochs, batch size, learning rate and chunk seconds must be positive")
+    if args.max_dev_oov is not None and not 0 <= args.max_dev_oov <= 1:
+        raise ValueError("max-dev-oov must be in [0,1]")
     if args.dev_teacher and not args.streaming:
         raise ValueError("--dev-teacher requires --streaming")
     if args.selection_metric != "auto" and not args.dev_teacher:
@@ -269,6 +286,17 @@ def main() -> None:
     if not args.streaming and any(not row for row in all_tokens):
         raise ValueError("at least one transcript became empty after tokenization")
     vocabulary = build_vocabulary(all_tokens[:len(train_records)])
+    coverage = token_coverage(all_tokens[:len(train_records)], all_tokens[len(train_records):])
+    if rank == 0:
+        print(json.dumps({"token_coverage": coverage}), flush=True)
+    if args.max_dev_oov is not None and coverage["dev"]["oov_token_rate"] > args.max_dev_oov:
+        raise ValueError(f"dev token OOV {coverage['dev']['oov_token_rate']:.4%} exceeds "
+                         f"--max-dev-oov {args.max_dev_oov:.4%}; expand independent training coverage")
+    samples_per_rank = len(train_records) // world if world > 1 else len(train_records)
+    steps_per_epoch = math.ceil(samples_per_rank / args.batch_size)
+    planned_steps = args.max_steps or args.epochs * steps_per_epoch
+    train_eval_indices = sorted(random.Random(args.seed).sample(
+        range(len(train_records)), min(args.train_eval_samples, len(train_records))))
     cache_dir = output / "features"
     if rank == 0:
         cache_dir.mkdir(parents=True, exist_ok=False)
@@ -276,6 +304,8 @@ def main() -> None:
             "model": args.model, "seed": args.seed, "train_samples": len(train_records),
             "dev_samples": len(dev_records), "world_size": world,
             "vocabulary": vocabulary,
+            "token_coverage": coverage, "steps_per_epoch": steps_per_epoch,
+            "planned_optimizer_steps": planned_steps, "train_eval_indices": train_eval_indices,
             "target_token_source": target_source, "selection_metric": selection_mode,
             "split": {"train": train_records, "dev": dev_records},
             "config": vars(args),
@@ -312,36 +342,31 @@ def main() -> None:
     loader, sampler = make_loader(train_indices, all_tokens, cache_dir, vocabulary,
                                   args.batch_size, rank, world, True, args.seed)
     best_score = None
+    global_step = 0
+    loss_sum = 0.0
+    interval_steps = 0
 
-    for epoch in range(1, args.epochs + 1):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-        head.train()
-        loss_sum = 0.0
-        steps = 0
-        for features, lengths, labels, label_lengths in loader:
-            optimizer.zero_grad(set_to_none=True)
-            logits = head(features.to(device=device, dtype=torch.float32))
-            # CPU CTCLoss works across torch_npu versions; autograd copies the
-            # gradient back to the NPU head. The frozen encoder has no graph.
-            log_probs = logits.float().log_softmax(-1).transpose(0, 1).cpu()
-            loss = criterion(log_probs, labels, lengths, label_lengths)
-            if not torch.isfinite(loss):
-                raise RuntimeError("non-finite CTC loss; check labels and frame lengths")
-            loss.backward()
-            optimizer.step()
-            loss_sum += float(loss.detach())
-            steps += 1
+    def validate_and_save(epoch):
+        nonlocal best_score, loss_sum, interval_steps
         if world > 1:
-            totals = torch.tensor([loss_sum, steps], device=device, dtype=torch.float32)
+            totals = torch.tensor([loss_sum, interval_steps], device=device, dtype=torch.float32)
             dist.all_reduce(totals)
-            loss_sum, steps = totals.cpu().tolist()
+            total_loss, total_steps = totals.cpu().tolist()
+        else:
+            total_loss, total_steps = loss_sum, interval_steps
         if rank == 0:
             metrics, rows = evaluate(head_module, cache_dir, len(train_records),
                                      dev_records, all_tokens, tokenizer, vocabulary, device)
             if dev_teacher is not None:
                 metrics.update(score_rows(rows, dev_teacher, verify_budget=args.verify_budget))
-            metrics.update({"epoch": epoch, "train_loss": loss_sum / steps})
+            if train_eval_indices:
+                train_metrics, _ = evaluate(head_module, cache_dir, 0,
+                    [train_records[i] for i in train_eval_indices], all_tokens,
+                    tokenizer, vocabulary, device, cache_indices=train_eval_indices)
+                metrics["train_subset"] = train_metrics
+            metrics.update({"epoch": epoch, "global_step": global_step,
+                            "train_loss": total_loss / total_steps,
+                            "train_loss_scope": "updates_since_last_evaluation"})
             with (output / "history.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
             print(json.dumps(metrics, ensure_ascii=False), flush=True)
@@ -356,15 +381,43 @@ def main() -> None:
                             "chunk_seconds": args.chunk_seconds if args.streaming else None,
                             "selection_metric": selected_mode, "verify_budget": args.verify_budget,
                             "target_token_source": target_source,
-                            "epoch": epoch}, output / "best_head.pt")
+                            "epoch": epoch, "global_step": global_step}, output / "best_head.pt")
                 (output / "best_metrics.json").write_text(
-                    json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
+                    json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
                 with (output / "best_predictions.jsonl").open("w", encoding="utf-8") as stream:
                     for row in rows:
                         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
         if world > 1:
             dist.barrier()
+        head.train()
+        loss_sum = 0.0
+        interval_steps = 0
+
+    for epoch in range(1, math.ceil(planned_steps / len(loader)) + 1):
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        head.train()
+        for features, lengths, labels, label_lengths in loader:
+            optimizer.zero_grad(set_to_none=True)
+            logits = head(features.to(device=device, dtype=torch.float32))
+            # CPU CTCLoss works across torch_npu versions; autograd copies the
+            # gradient back to the NPU head. The frozen encoder has no graph.
+            log_probs = logits.float().log_softmax(-1).transpose(0, 1).cpu()
+            loss = criterion(log_probs, labels, lengths, label_lengths)
+            if not torch.isfinite(loss):
+                raise RuntimeError("non-finite CTC loss; check labels and frame lengths")
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach())
+            interval_steps += 1
+            global_step += 1
+            if args.eval_every_steps and (global_step % args.eval_every_steps == 0
+                                           or global_step == planned_steps):
+                validate_and_save(epoch)
+            if global_step == planned_steps:
+                break
+        if not args.eval_every_steps:
+            validate_and_save(epoch)
     if world > 1:
         dist.destroy_process_group()
 

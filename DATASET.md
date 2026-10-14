@@ -78,6 +78,8 @@ done
 
 ## 3. 8 卡训练与独立测试
 
+以下 15 epoch 是原小规模启动试验：828 个事件、8 卡、每卡 batch 8 仅有 195 次更新，不能据此判断已收敛。扩大训练覆盖、保留原 holdout 并按更新步数训练的流程见 [第二阶段实验](STAGE2.md)。
+
 在能成功导入 `qwen_asr` 的 Python 环境中启动，显式固定 worker 解释器；裸 `torchrun` 可能来自系统环境，详见 [排障说明](TROUBLESHOOTING.md)。
 
 ```bash
